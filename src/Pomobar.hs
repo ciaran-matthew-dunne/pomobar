@@ -20,17 +20,13 @@ import System.Process (spawnCommand)
 data TimerState = TimerState {
   status        :: TimerStatus,
   duration      :: Int, -- in seconds
+  split         :: Int, -- timer split
   started       :: UTCTime,
   refreshThread :: MVar ThreadId
 }
-
-
 data TimerStatus = Running | Standing | Paused | Terminated deriving Eq
-
 data Timer = Timer (MVar TimerState) TimerConfig
-
 type Colour = String
-
 data TimerConfig = TimerConfig {
   runningFgColour     :: Maybe Colour,
   pausedFgColour      :: Maybe Colour,
@@ -73,21 +69,19 @@ newTimer :: TimerConfig -> IO Timer
 newTimer timerConfig = do
   thread <- newEmptyMVar
   now <- getCurrentTime
-  state <- newMVar (TimerState Terminated 0 now thread)
+  state <- newMVar (TimerState Terminated 0 0 now thread)
   return $ Timer state timerConfig
 
 
-
-
-startTimer :: Timer -> Int -> IO ()
-startTimer timer@(Timer mvarState timerConfig) dur = do
+startTimer :: Timer -> Int -> Int -> IO ()
+startTimer timer@(Timer mvarState timerConfig) dur spl = do
   state <- takeMVar mvarState
   tryTakeMVar (refreshThread state) >>= tryKillThread
   rtID <- forkIO $ timerRefreshThread timer
   putMVar (refreshThread state) rtID
   now <- getCurrentTime
   executeCmd $ startedShellCmd timerConfig
-  putMVar mvarState $ TimerState Running (fromIntegral dur) now (refreshThread state)
+  putMVar mvarState $ TimerState Running (fromIntegral dur) (fromIntegral spl) now (refreshThread state)
   where tryKillThread (Just threadId) = killThread threadId
         tryKillThread Nothing = return ()
 
@@ -127,13 +121,13 @@ timerAdd timer@(Timer mvarState timerConfig) x = do
           putMVar mvarState newState
         Terminated -> do
           putMVar mvarState newState
-          startTimer timer diffSec
+          startTimer timer diffSec (split state)
 
 resumeTimer :: Timer -> IO ()
 resumeTimer timer@(Timer mvarState _) = do
   state <- readMVar mvarState
   case (status state) of
-    Paused -> startTimer timer (duration state)
+    Paused -> startTimer timer (duration state) (split state)
     _      -> return ()
 
 terminateTimer :: Timer -> IO ()
@@ -148,7 +142,6 @@ terminateTimer (Timer mvarState timerConfig) = do
         delay Nothing  = 0
         delay (Just x) = x
 
-
 timerRefreshThread :: Timer -> IO ()
 timerRefreshThread timer@(Timer mvarState timerConfig) = do
   state <- readMVar mvarState
@@ -156,7 +149,7 @@ timerRefreshThread timer@(Timer mvarState timerConfig) = do
   let 
     durDiff = calculateRemaining now state
     mins    = formatOutput durDiff (status state) timerConfig
-    line    = timerLine 50 now state  
+    line    = xmobarGraphString (timerLine 100 (split state) now state)
   if durDiff <= 0
     then terminateTimer timer
     else do putStrLn $ (line ++ "    " ++ mins)
@@ -182,10 +175,10 @@ formatOutput x s c = xmobarString (printf "%02d" mins ++ ":" ++ printf "%02d" se
   bgColour _          = Nothing
 
 line :: Int -> [Char]
-line n = take (n+1) (repeat '-')
+line n = replicate (n) ('-')
 
-split n = [1 * (1/n) * k | k <- [0..n]]
-
+splitVals :: Int -> [Double]
+splitVals n = [ 1 * (fromIntegral k /fromIntegral n) | k <- [1..n] ]
 
 fracLen :: Int -> Double -> Int
 fracLen n r = round (fromIntegral n * r)
@@ -197,20 +190,16 @@ placeChar x d str =
 dot :: Char -> Double -> [Char] -> [Char]
 dot c r str = placeChar (fracLen (length str) r) c str
 
-miniBreak n str = foldr (dot 'o') str (tail $ split (n+1))   
-
-
+addBreaks :: Int -> [Char] -> [Char] 
+addBreaks n str = foldr (dot 'o') str (splitVals n)   
 
 wrap :: [Char] -> (String,String) -> [Char]
 wrap xs (l,r) = l ++ xs ++ r
 
-myLine :: Int -> Double -> [Char]
-myLine n r = 
-  wrap 
-    (dot '*' r (miniBreak 4 (line n)))
-    ("[", "]")
+myLine :: Int -> Int -> Double -> [Char]
+myLine n k r = 
+  wrap (dot '*' r (addBreaks k (line n))) ("[", "]")
     
-
 calculateRemaining :: UTCTime -> TimerState -> Int
 calculateRemaining time state = 
   (duration state) - round (diffUTCTime time (started state))
@@ -220,9 +209,9 @@ timerFrac time state =
   let t = (duration state)
   in fromIntegral (t - calculateRemaining time state) / fromIntegral t
 
-timerLine :: Int -> UTCTime -> TimerState -> String
-timerLine n time state = 
-    myLine n (timerFrac time state)
+timerLine :: Int -> Int -> UTCTime -> TimerState -> String
+timerLine n k time state = 
+    myLine n k (timerFrac time state)
 
 startDBus :: Timer -> IO ()
 startDBus timer@(Timer mvarState _) = do
@@ -232,34 +221,42 @@ startDBus timer@(Timer mvarState _) = do
   export client "/org/pomobar"
     [
       autoMethod "org.Pomobar" "startTimer" dbusStart,
+      autoMethod "org.Pomobar" "startTimerGraph" dbusStartGraph,
       autoMethod "org.Pomobar" "pauseResumeTimer" dbusPauseResume,
       autoMethod "org.Pomobar" "timerAddMin" dbusTimerAdd,
       autoMethod "org.Pomobar" "startTimerSwitch" (dbusStartTimerSwitch timerSwitchState)
     ]
-  where dbusStart :: Int16 -> IO ()
-        dbusStart durationMin = startTimer timer $ fromIntegral durationMin * 60
-        dbusPauseResume = do
-          state <- readMVar mvarState
-          case (status state) of
-            Running -> pauseTimer timer
-            Paused  -> resumeTimer timer
-            _       -> return ()
-        dbusTimerAdd :: Int16 -> IO()
-        dbusTimerAdd = timerAdd timer . fromIntegral
-        dbusStartTimerSwitch :: MVar Int -> [Int16] -> IO ()
-        dbusStartTimerSwitch switchState xs = do
-          now <- getCurrentTime
-          state <- readMVar mvarState
-          i <- if (diffUTCTime now (started state)) > 1.0
-                 then swapMVar switchState 0 >> return 0
-                 else modifyMVar switchState (\x -> return (x+1,x+1))
-          startTimer timer $ (60 *) $ fromIntegral $ (cycle xs) !! i
+  where 
+    dbusStart :: Int16 -> IO ()
+    dbusStart durationMin = startTimer timer (fromIntegral durationMin * 60) 1 
+    dbusPauseResume = do
+      state <- readMVar mvarState
+      case (status state) of
+        Running -> pauseTimer timer
+        Paused  -> resumeTimer timer
+        _       -> return ()
+    dbusStartGraph :: [Int16] -> IO()
+    dbusStartGraph [t,k] = startTimer timer (fromIntegral t * 60) (fromIntegral k)
+    dbusStartGraph _ = error "bad!"
+    dbusTimerAdd :: Int16 -> IO()
+    dbusTimerAdd = timerAdd timer . fromIntegral
+    dbusStartTimerSwitch :: MVar Int -> [Int16] -> IO ()
+    dbusStartTimerSwitch switchState xs = do
+      now <- getCurrentTime
+      state <- readMVar mvarState
+      i <- if (diffUTCTime now (started state)) > 1.0
+             then swapMVar switchState 0 >> return 0
+             else modifyMVar switchState (\x -> return (x+1,x+1))
+      startTimer timer (60 * fromIntegral ((cycle xs) !! i)) 1
 
 xmobarString :: String -> Maybe String -> Maybe String -> String
 xmobarString s Nothing _ = s
 xmobarString s (Just fg) bg = "<fc=" ++ fg ++ stringBg bg ++ ">" ++ s ++ "</fc>"
   where stringBg Nothing  = ""
         stringBg (Just c) = "," ++ c
+
+xmobarGraphString :: String -> String
+xmobarGraphString str = "<fc=#51afef>" ++ str ++ "</fc>"
 
 waitForever :: IO ()
 waitForever = forever $ threadDelay maxBound
