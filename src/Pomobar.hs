@@ -24,7 +24,8 @@ data TimerState = TimerState {
   refreshThread :: MVar ThreadId
 }
 
-data TimerStatus = Running | Paused | Terminated deriving Eq
+
+data TimerStatus = Running | Standing | Paused | Terminated deriving Eq
 
 data Timer = Timer (MVar TimerState) TimerConfig
 
@@ -74,6 +75,9 @@ newTimer timerConfig = do
   now <- getCurrentTime
   state <- newMVar (TimerState Terminated 0 now thread)
   return $ Timer state timerConfig
+
+
+
 
 startTimer :: Timer -> Int -> IO ()
 startTimer timer@(Timer mvarState timerConfig) dur = do
@@ -149,10 +153,13 @@ timerRefreshThread :: Timer -> IO ()
 timerRefreshThread timer@(Timer mvarState timerConfig) = do
   state <- readMVar mvarState
   now <- getCurrentTime
-  let durDiff = calculateRemaining now state
+  let 
+    durDiff = calculateRemaining now state
+    mins    = formatOutput durDiff (status state) timerConfig
+    line    = timerLine 50 now state  
   if durDiff <= 0
     then terminateTimer timer
-    else do putStrLn $ formatOutput durDiff (status state) timerConfig
+    else do putStrLn $ (line ++ "    " ++ mins)
             threadDelay $ 1000000
             timerRefreshThread timer
 
@@ -174,8 +181,48 @@ formatOutput x s c = xmobarString (printf "%02d" mins ++ ":" ++ printf "%02d" se
   bgColour Terminated = if x `rem` 2 == 0 then terminatedBg1Colour c else terminatedBg2Colour c
   bgColour _          = Nothing
 
+line :: Int -> [Char]
+line n = take (n+1) (repeat '-')
+
+split n = [1 * (1/n) * k | k <- [0..n]]
+
+
+fracLen :: Int -> Double -> Int
+fracLen n r = round (fromIntegral n * r)
+
+placeChar :: Int -> Char -> [Char] -> [Char]
+placeChar x d str = 
+  [if i == x then d else c | (i,c) <- zip [0..] str ] 
+
+dot :: Char -> Double -> [Char] -> [Char]
+dot c r str = placeChar (fracLen (length str) r) c str
+
+miniBreak n str = foldr (dot 'o') str (tail $ split (n+1))   
+
+
+
+wrap :: [Char] -> (String,String) -> [Char]
+wrap xs (l,r) = l ++ xs ++ r
+
+myLine :: Int -> Double -> [Char]
+myLine n r = 
+  wrap 
+    (dot '*' r (miniBreak 4 (line n)))
+    ("[", "]")
+    
+
 calculateRemaining :: UTCTime -> TimerState -> Int
-calculateRemaining time state = (duration state) - round (diffUTCTime time (started state))
+calculateRemaining time state = 
+  (duration state) - round (diffUTCTime time (started state))
+
+timerFrac :: UTCTime -> TimerState -> Double
+timerFrac time state = 
+  let t = (duration state)
+  in fromIntegral (t - calculateRemaining time state) / fromIntegral t
+
+timerLine :: Int -> UTCTime -> TimerState -> String
+timerLine n time state = 
+    myLine n (timerFrac time state)
 
 startDBus :: Timer -> IO ()
 startDBus timer@(Timer mvarState _) = do
