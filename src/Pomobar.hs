@@ -28,6 +28,7 @@ data TimerStatus = Running | Standing | Paused | Terminated deriving Eq
 data Timer = Timer (MVar TimerState) TimerConfig
 type Colour = String
 data TimerConfig = TimerConfig {
+  width :: Int,
   runningFgColour     :: Maybe Colour,
   pausedFgColour      :: Maybe Colour,
   terminatingFgColour :: Maybe Colour,
@@ -42,6 +43,7 @@ data TimerConfig = TimerConfig {
 
 defaultTimerConfig :: TimerConfig
 defaultTimerConfig = TimerConfig
+                       (50)
                        (Just "green")
                        (Just "#4682B4")
                        (Just "orange")
@@ -149,7 +151,7 @@ timerRefreshThread timer@(Timer mvarState timerConfig) = do
   let 
     durDiff = calculateRemaining now state
     mins    = formatOutput durDiff (status state) timerConfig
-    line    = xmobarGraphString (timerLine 100 (split state) now state)
+    line    = xmobarGraphString (timerLine (width timerConfig) (split state) now state)
   if durDiff <= 0
     then terminateTimer timer
     else do putStrLn $ (line ++ "    " ++ mins)
@@ -210,8 +212,7 @@ timerFrac time state =
   in fromIntegral (t - calculateRemaining time state) / fromIntegral t
 
 timerLine :: Int -> Int -> UTCTime -> TimerState -> String
-timerLine n k time state = 
-    myLine n k (timerFrac time state)
+timerLine n k time state = myLine n k (timerFrac time state)
 
 startDBus :: Timer -> IO ()
 startDBus timer@(Timer mvarState _) = do
