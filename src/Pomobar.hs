@@ -11,22 +11,13 @@ module Pomobar
 import Control.Concurrent
 import Control.Monad
 import Data.Int (Int16)
+import Data.Time
 import Data.Time.Clock
 import DBus.Client
 import Text.Printf (printf)
 import System.IO (hSetBuffering, stdout, BufferMode(..))
 import System.Process (spawnCommand)
 
-data TimerState = TimerState {
-  status        :: TimerStatus,
-  duration      :: Int, -- in seconds
-  split         :: Int, -- timer split
-  started       :: UTCTime,
-  refreshThread :: MVar ThreadId
-}
-data TimerStatus = Running | Standing | Paused | Terminated deriving Eq
-data Timer = Timer (MVar TimerState) TimerConfig
-type Colour = String
 data TimerConfig = TimerConfig {
   width :: Int,
   runningFgColour     :: Maybe Colour,
@@ -40,6 +31,18 @@ data TimerConfig = TimerConfig {
   startedShellCmd  :: Maybe String,
   terminatedShellCmd  :: Maybe String
 }
+
+data TimerStatus = Running | Standing | Paused | Terminated deriving Eq
+data TimerState = TimerState {
+  status        :: TimerStatus,
+  duration      :: Int, -- how long timer will run for in seconds
+  split         :: Int, -- how many shifts in timer
+  started       :: UTCTime, -- what time started
+  refreshThread :: MVar ThreadId }
+
+data Timer = Timer (MVar TimerState) TimerConfig
+
+type Colour = String
 
 defaultTimerConfig :: TimerConfig
 defaultTimerConfig = TimerConfig
@@ -151,12 +154,16 @@ timerRefreshThread timer@(Timer mvarState timerConfig) = do
   let 
     durDiff = calculateRemaining now state
     mins    = formatOutput durDiff (status state) timerConfig
-    line    = xmobarGraphString (timerLine (width timerConfig) (split state) now state)
+    line    = (timerLine (width timerConfig) (split state) now state)
   if durDiff <= 0
     then terminateTimer timer
-    else do putStrLn $ (line ++ "    " ++ mins)
+    else do putStrLn $ (line ++ " ∙ " ++ mins)
             threadDelay $ 1000000
             timerRefreshThread timer
+
+
+
+
 
 formatOutput :: Int -> TimerStatus -> TimerConfig -> String
 formatOutput x s c = xmobarString (printf "%02d" mins ++ ":" ++ printf "%02d" secs) (fgColour s) (bgColour s) where
@@ -176,43 +183,9 @@ formatOutput x s c = xmobarString (printf "%02d" mins ++ ":" ++ printf "%02d" se
   bgColour Terminated = if x `rem` 2 == 0 then terminatedBg1Colour c else terminatedBg2Colour c
   bgColour _          = Nothing
 
-line :: Int -> [Char]
-line n = replicate (n) ('-')
-
-splitVals :: Int -> [Double]
-splitVals n = [ 1 * (fromIntegral k /fromIntegral n) | k <- [1..n] ]
-
-fracLen :: Int -> Double -> Int
-fracLen n r = round (fromIntegral n * r)
-
-placeChar :: Int -> Char -> [Char] -> [Char]
-placeChar x d str = 
-  [if i == x then d else c | (i,c) <- zip [0..] str ] 
-
-dot :: Char -> Double -> [Char] -> [Char]
-dot c r str = placeChar (fracLen (length str) r) c str
-
-addBreaks :: Int -> [Char] -> [Char] 
-addBreaks n str = foldr (dot 'o') str (splitVals n)   
-
-wrap :: [Char] -> (String,String) -> [Char]
-wrap xs (l,r) = l ++ xs ++ r
-
-myLine :: Int -> Int -> Double -> [Char]
-myLine n k r = 
-  wrap (dot '*' r (addBreaks k (line n))) ("[", "]")
-    
 calculateRemaining :: UTCTime -> TimerState -> Int
-calculateRemaining time state = 
+calculateRemaining time state =
   (duration state) - round (diffUTCTime time (started state))
-
-timerFrac :: UTCTime -> TimerState -> Double
-timerFrac time state = 
-  let t = (duration state)
-  in fromIntegral (t - calculateRemaining time state) / fromIntegral t
-
-timerLine :: Int -> Int -> UTCTime -> TimerState -> String
-timerLine n k time state = myLine n k (timerFrac time state)
 
 startDBus :: Timer -> IO ()
 startDBus timer@(Timer mvarState _) = do
@@ -256,8 +229,66 @@ xmobarString s (Just fg) bg = "<fc=" ++ fg ++ stringBg bg ++ ">" ++ s ++ "</fc>"
   where stringBg Nothing  = ""
         stringBg (Just c) = "," ++ c
 
-xmobarGraphString :: String -> String
-xmobarGraphString str = "<fc=#51afef>" ++ str ++ "</fc>"
+blue :: String -> String
+blue str = "<fc=#51afef>" ++ str ++ "</fc>"
+yellow :: String -> String
+yellow str = "<fc=#FB8B24>" ++ str ++ "</fc>"
+green :: String -> String
+green str = "<fc=#5CFF95>" ++ str ++ "</fc>"
+
 
 waitForever :: IO ()
 waitForever = forever $ threadDelay maxBound
+
+------ GRAPH TIMER STUFF ------
+line :: Int -> [String]
+line n = replicate (n) ("-")
+
+splitVals :: Int -> [Double]
+splitVals n = [ 1 * (fromIntegral k /fromIntegral n) | k <- [1..n] ]
+
+fracLen :: Int -> Double -> Int
+fracLen n r = round (fromIntegral n * r)
+
+placeChar :: String -> [String] -> Int -> [String]
+placeChar str graph k  = 
+  [if i == k then str else c | (i,c) <- zip [0..] graph ] 
+
+dot :: String -> Double -> [String] -> [String]
+dot str r graph = placeChar str graph (fracLen (length graph) r)
+
+addBreaks :: Int -> String -> [String] -> [String] 
+addBreaks n str graph = foldr (dot str) graph (splitVals n)   
+
+wrap :: [String] -> (String,String) -> [String]
+wrap xs (l,r) = [l] ++ xs ++ [r]
+
+bst :: UTCTime -> String 
+bst t = 
+  let t' = addUTCTime (60 * 60 :: NominalDiffTime) t
+  in (formatTime defaultTimeLocale "%R" t')
+
+-- adds breaks, wraps in [], adds start/end time to both ends
+myLine :: Int -> Int -> Double -> (String, String) -> String
+myLine n k r (start,end) = concat (wrap now (blue $ start ++ " [", blue $ "] " ++ end))
+  where 
+    (hd,tl) = splitAt (fracLen n r) (line n)
+    elapsed = (map green hd ++ map blue tl)
+    breaks  = (addBreaks k (yellow "o") elapsed)
+    now     = dot (blue "*") r breaks
+
+  
+timerFrac :: UTCTime -> TimerState -> Double
+timerFrac time state = 
+  let t = (duration state)
+  in fromIntegral (t - calculateRemaining time state) / fromIntegral t
+
+startAndEndTimes :: TimerState -> (String, String)
+startAndEndTimes state = 
+    (bst (started state), 
+      bst (addUTCTime (fromIntegral (duration state) :: NominalDiffTime) (started state)))
+
+timerLine :: Int -> Int -> UTCTime -> TimerState -> String
+timerLine n k time state = 
+  myLine n k (timerFrac time state) (startAndEndTimes state)
+

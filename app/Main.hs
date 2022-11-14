@@ -5,8 +5,11 @@ import Options.Applicative
 import Data.Semigroup ((<>))
 
 parseColours :: Parser TimerConfig
-parseColours = (TimerConfig (width defaultTimerConfig))
-             <$> option cReader (long "runningFgColour"
+parseColours = TimerConfig
+             <$> option auto (long "width" 
+                             <> (value $ width defaultTimerConfig)
+                             <> help "timer graph width")
+             <*> option cReader (long "runningFgColour"
                                    <> (value $ runningFgColour defaultTimerConfig)
                                    <> help "FG running colour")
              <*> option cReader (long "pausedFgColour"
